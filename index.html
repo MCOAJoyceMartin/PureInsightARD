@@ -148,15 +148,30 @@
   .teams-status.qualifies{background:var(--gold-light);color:var(--gold);}
   .teams-status.no-match{background:var(--surface2);color:var(--text3);font-weight:600;}
 
+  .nursing-cat-group{margin-bottom:8px;}
+  .nursing-cat-group:last-child{margin-bottom:0;}
+  .nursing-cat-title{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin:12px 0 4px;padding-top:8px;border-top:1px solid var(--border);}
+  .nursing-cat-group:first-child .nursing-cat-title{margin-top:0;padding-top:0;border-top:none;}
+  .finding-item .fcode.fcode-possible{background:var(--gold-light);color:var(--gold);}
+  .finding-item .fnote{color:var(--gold);font-size:10.5px;margin-top:2px;}
+
   @media (max-width:1100px){ .layout{grid-template-columns:260px 1fr;} .source-panel{grid-column:1/3;} }
 
 /* ================= MDS / PDPM ARD Review — additive styles ================= */
 :root{ --purple:#6B3FA0; --purple-light:#F1E9F7; }
 
-.mode-tabs{display:flex;gap:8px;padding:10px 14px 0;}
-.mode-tab{border:1px solid var(--border);background:var(--surface);border-radius:20px;padding:7px 16px;font-size:12.5px;font-weight:700;color:var(--text2);cursor:pointer;font-family:'DM Sans',sans-serif;}
-.mode-tab.active{border-color:var(--accent);background:var(--accent-light);color:var(--brand-dark);}
+.mode-tabs{display:flex;gap:10px;padding:14px;margin:10px 14px 0;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.05);}
+.mode-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;border:2px solid var(--border);background:var(--surface2);border-radius:10px;padding:12px 14px;font-size:13.5px;font-weight:700;color:var(--text2);cursor:pointer;font-family:'DM Sans',sans-serif;transition:border-color .15s, background .15s, color .15s, box-shadow .15s;}
+.mode-tab .m-icon{font-size:16px;}
 .mode-tab:hover{border-color:var(--brand);}
+.mode-tab.active{color:#fff;box-shadow:0 3px 10px rgba(0,0,0,0.15);}
+#modeTabReferral.active{background:var(--brand);border-color:var(--brand-dark);}
+#modeTabArd.active{background:var(--purple);border-color:#4E2C78;}
+
+.upload-bar-row{display:flex;gap:10px;align-items:stretch;}
+.upload-bar-row .dropzone-inline{flex:1;}
+.clear-docs-btn{flex-shrink:0;display:flex;align-items:center;gap:7px;border:1px solid var(--border);background:var(--surface);color:var(--danger);border-radius:10px;padding:0 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;white-space:nowrap;}
+.clear-docs-btn:hover{background:var(--danger-light);border-color:var(--danger);}
 
 .ard-panel{grid-column:1 / 3;display:flex;flex-direction:column;gap:12px;}
 .ard-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;}
@@ -262,6 +277,7 @@
 </div>
 
 <div class="upload-bar">
+  <div class="upload-bar-row">
   <label class="dropzone-inline" for="fileUpload" id="dropzone">
     <span class="icon">&#8679;</span>
     <div>
@@ -270,14 +286,16 @@
     </div>
     <input type="file" id="fileUpload" accept="application/pdf" onchange="handleUpload(this.files[0])">
   </label>
+  <button type="button" class="clear-docs-btn" id="clearDocsBtn" onclick="clearUploadedDocuments()">&#128465;&#65039; Clear Uploaded PDFs</button>
+  </div>
   <div class="upload-status" id="uploadStatus"></div>
 </div>
 
 <div class="chip-row" id="chipRow"></div>
 
 <div class="mode-tabs" id="modeTabs">
-  <button type="button" class="mode-tab active" id="modeTabReferral" onclick="setMode('referral')">Referral Packet Analysis</button>
-  <button type="button" class="mode-tab" id="modeTabArd" onclick="setMode('ard')">MDS / PDPM ARD Review</button>
+  <button type="button" class="mode-tab active" id="modeTabReferral" onclick="setMode('referral')"><span class="m-icon">&#128196;</span> Referral Packet Analysis</button>
+  <button type="button" class="mode-tab" id="modeTabArd" onclick="setMode('ard')"><span class="m-icon">&#127973;</span> MDS / PDPM ARD Review</button>
 </div>
 
 <div class="layout">
@@ -298,6 +316,10 @@
     <div class="finding-box">
       <div class="finding-head"><span class="bar"></span><span class="label">Keyword Matches</span><span class="count" id="countKeywords"></span></div>
       <div class="finding-body" id="findKeywords"></div>
+    </div>
+    <div class="finding-box">
+      <div class="finding-head"><span class="bar"></span><span class="label">Nursing Category Keyword Matches</span><span class="count" id="countNursing"></span></div>
+      <div class="finding-body" id="findNursing"></div>
     </div>
     <div class="finding-box">
       <div class="finding-head"><span class="bar"></span><span class="label">CMS TEAM Program</span><span class="count" id="countTeams"></span></div>
@@ -838,6 +860,420 @@ function extractKeywordMatches(sources){
   return out;
 }
 
+// ---- PDPM Nursing Category keyword / condition matching -----------------
+// Deterministic keyword/phrase matching only (no LLM, no auto-scoring).
+// Rows with a "+" in the source table (co-occurring documentation items)
+// are modeled as `all` groups: each group must independently be present
+// somewhere in the packet. A match found together on the same page is
+// reported as a confirmed hit; a match where the parts only appear on
+// different pages is reported as "possible" and flagged for manual
+// verification, since the packet never actually documents them together.
+// Criteria that depend on counting frequency/duration in free text (e.g.
+// "insulin injections on all 7 days", "≥2 order changes", "daily"
+// respiratory therapy) cannot be reliably confirmed by keyword search, so
+// those conditions always carry a manualNote rather than claiming a firm
+// match on frequency.
+const PDPM_NURSING_CATEGORIES = [
+  {
+    key: 'extensive', label: 'Extensive Services',
+    conditions: [
+      { label: 'Tracheostomy care', any: ['tracheostomy'] },
+      { label: 'Ventilator / respirator', any: ['ventilator', 'respirator'] },
+      { label: 'Infection isolation', any: ['infection isolation', 'isolation precautions', 'droplet precautions', 'contact precautions', 'airborne precautions', 'isolation'] }
+    ]
+  },
+  {
+    key: 'schigh', label: 'Special Care High',
+    conditions: [
+      { label: 'Comatose / completely dependent', any: ['comatose', 'completely dependent', 'totally dependent', 'total dependence'] },
+      { label: 'Septicemia', any: ['septicemia', 'sepsis'] },
+      { label: 'Diabetes with daily insulin injections + insulin order changes', all: [['diabetes', 'diabetic', 'diabetes mellitus'], ['insulin']],
+        manualNote: 'PDPM requires insulin injections on all 7 days of the look-back period AND ≥2 insulin order changes — that frequency/order-change history can’t be confirmed from packet text and must be verified manually.' },
+      { label: 'Quadriplegia', any: ['quadriplegia', 'quadriplegic'] },
+      { label: 'COPD with shortness of breath lying flat', all: [['copd', 'chronic obstructive pulmonary disease'], ['shortness of breath', 'sob', 'dyspnea', 'orthopnea']],
+        manualNote: 'Confirm the packet documents shortness of breath specifically when lying flat (orthopnea) — not just COPD and SOB mentioned separately.' },
+      { label: 'Fever with pneumonia, vomiting, weight loss, or feeding tube', all: [['fever'], ['pneumonia', 'vomiting', 'weight loss', 'feeding tube']] },
+      { label: 'Parenteral / IV feeding', any: ['parenteral feeding', 'parenteral nutrition', 'tpn', 'iv feeding', 'intravenous feeding'] },
+      { label: 'Daily respiratory therapy', any: ['respiratory therapy'],
+        manualNote: 'Confirm the packet documents respiratory therapy delivered daily — frequency can’t be confirmed from text alone.' }
+    ]
+  },
+  {
+    key: 'sclow', label: 'Special Care Low',
+    conditions: [
+      { label: 'Cerebral palsy, multiple sclerosis, or Parkinson’s disease', any: ['cerebral palsy', 'multiple sclerosis', 'parkinson’s disease', "parkinson's disease", 'parkinsons disease', 'parkinson disease'], wordRe: [/\bMS\b/] },
+      { label: 'Respiratory failure with oxygen therapy', all: [['respiratory failure'], ['oxygen therapy', 'supplemental oxygen', 'o2 therapy']] },
+      { label: 'Feeding tube', any: ['feeding tube', 'peg tube', 'g-tube', 'gtube', 'gastrostomy tube', 'ng tube', 'nasogastric tube'] },
+      { label: 'Pressure ulcers', any: ['pressure ulcer', 'pressure injury', 'pressure sore', 'decubitus'] },
+      { label: 'Venous / arterial ulcers', any: ['venous ulcer', 'arterial ulcer', 'venous stasis ulcer'] },
+      { label: 'Diabetic foot ulcer / foot infection / open foot lesion with dressings', all: [['diabetic foot ulcer', 'foot infection', 'open lesion of the foot', 'open lesion of foot', 'foot ulcer'], ['dressing']] },
+      { label: 'Radiation', any: ['radiation therapy', 'radiation treatment', 'xrt', 'radiation'] },
+      { label: 'Dialysis', any: ['dialysis', 'hemodialysis', 'peritoneal dialysis'] }
+    ]
+  },
+  {
+    key: 'complex', label: 'Clinically Complex',
+    conditions: [
+      { label: 'Pneumonia', any: ['pneumonia'] },
+      { label: 'Hemiplegia / hemiparesis', any: ['hemiplegia', 'hemiparesis'] },
+      { label: 'Open lesion or surgical wound with skin treatment', all: [['open lesion', 'surgical wound', 'open wound'], ['skin treatment', 'wound care', 'dressing change', 'wound treatment']] },
+      { label: '2nd or 3rd degree burns', any: ['2nd degree burn', 'second degree burn', '3rd degree burn', 'third degree burn'] },
+      { label: 'Chemotherapy', any: ['chemotherapy', 'chemo'] },
+      { label: 'Oxygen therapy', any: ['oxygen therapy', 'supplemental oxygen', 'o2 therapy'] },
+      { label: 'IV medications', any: ['iv medication', 'intravenous medication', 'iv antibiotics', 'iv meds'] },
+      { label: 'Transfusions', any: ['transfusion', 'blood transfusion', 'prbc'] }
+    ]
+  }
+];
+
+function buildNursingCategoryMatches(sources){
+  const pages = (sources || []).map(([pageLabel, text]) => ({pageLabel, lower: String(text || '').toLowerCase(), raw: String(text || '')}));
+
+  function pagesMatchingAny(terms){
+    const hit = [];
+    pages.forEach(pg => { if (terms.some(t => pg.lower.includes(t))) hit.push(pg.pageLabel); });
+    return hit;
+  }
+  function pagesMatchingWordRe(res){
+    const hit = [];
+    pages.forEach(pg => { if (res.some(re => re.test(pg.raw))) hit.push(pg.pageLabel); });
+    return hit;
+  }
+
+  return PDPM_NURSING_CATEGORIES.map(cat => {
+    const conditions = cat.conditions.map(cond => {
+      let matchPages = [];
+      let status = 'none';
+      let detail = '';
+
+      if (cond.any) {
+        matchPages = pagesMatchingAny(cond.any.map(t => t.toLowerCase()));
+        if (cond.wordRe) matchPages = Array.from(new Set([...matchPages, ...pagesMatchingWordRe(cond.wordRe)]));
+        if (matchPages.length) status = 'match';
+      } else if (cond.all) {
+        const groupPages = cond.all.map(group => pagesMatchingAny(group.map(t => t.toLowerCase())));
+        const onSamePage = groupPages[0].filter(pg => groupPages.every(gp => gp.includes(pg)));
+        if (onSamePage.length) {
+          matchPages = onSamePage;
+          status = 'match';
+        } else if (groupPages.every(gp => gp.length)) {
+          matchPages = Array.from(new Set(groupPages.flat()));
+          status = 'possible';
+          detail = 'The parts of this condition were found in different sections of the packet, not documented together — verify manually.';
+        }
+      }
+
+      if (status === 'none') return null;
+      return {label: cond.label, status, pages: matchPages, detail, manualNote: cond.manualNote || ''};
+    }).filter(Boolean);
+    return {key: cat.key, label: cat.label, conditions};
+  }).filter(cat => cat.conditions.length);
+}
+
+// ---------------------------------------------------------------------
+// Best-effort structured-field extraction for uploaded documents.
+//
+// The 4 built-in demo patients (Ford/Craul/Glasco/Dickinson) have their
+// Demographics/Insurance/Clinical fields hand-curated by reading each PDF.
+// Freshly uploaded PDFs get none of that manual attention, so these
+// functions try to recognize the same recurring label/value patterns Epic
+// referral-fax templates use (the same "PURE HEALTH TRANSITIONAL CARE...
+// ACUTE REHAB/SNF/NH REFERRALS FAX PACKET" layout the Ford and Glasco demo
+// packets use) and pull out real values with regexes -- nothing here is
+// guessed or invented, every value comes from text that is literally
+// present in the PDF. Referral packets that don't follow this layout will
+// simply come back with fewer (or no) rows; the source pages on the right
+// always have the full verbatim text regardless.
+function normalizeWs(s){
+  return (s || '').replace(/\u00A0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+}
+
+// Some referral layouts wrap a single value across multiple lines (a wrapped
+// street address, a hyphenated account number split at the line break).
+// Re-join those into one clean string: a trailing hyphen means the word
+// itself was split mid-token, anything else just becomes a space.
+function joinWrapped(s){
+  return (s || '')
+    .replace(/-\s*\n\s*/g, '-')
+    .replace(/\n+/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function titleCaseFacility(s){
+  return (s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// A raw address-shaped match can appear more than once in a referral (a
+// facility letterhead, a payer's remittance address, the patient's actual
+// home address). Prefer whichever match has the word "Address" nearby --
+// that's almost always the one actually labeled as the patient's address --
+// and only fall back to the first match found if none are labeled.
+function bestAddressMatch(full){
+  const re = /\n(\d+\s+[A-Z0-9][A-Z0-9 .,'-]{2,40})\n([A-Z][A-Za-z .,'-]+,?\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?)\n/g;
+  let m, first = null, labeled = null;
+  while ((m = re.exec(full))) {
+    if (!first) first = m;
+    if (!labeled && /Address/.test(full.slice(Math.max(0, m.index - 30), m.index))) labeled = m;
+  }
+  return labeled || first;
+}
+
+// Some referral layouts print a label alone on its own line, with the value
+// (possibly spanning several wrapped lines) following before the next known
+// label. This scans the whole document for each label's position and takes
+// the text between it and the next label found as that field's value --
+// works regardless of exactly how many lines the value wraps across.
+function extractStackedFields(text, fieldDefs){
+  const matches = [];
+  fieldDefs.forEach(({key, label}) => {
+    const m = label.exec(text);
+    if (m) matches.push({key, start: m.index, end: m.index + m[0].length});
+  });
+  matches.sort((a, b) => a.start - b.start);
+  const result = {};
+  matches.forEach((m, i) => {
+    const nextStart = i + 1 < matches.length ? matches[i + 1].start : Math.min(text.length, m.end + 300);
+    const val = text.slice(m.end, nextStart).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    if (val && !(m.key in result)) result[m.key] = val;
+  });
+  return result;
+}
+
+// PureInsights has seen two recurring real-world referral layouts so far:
+//   Template A -- Epic "...ACUTE REHAB/SNF/NH REFERRALS FAX PACKET" printouts
+//     (table-style: a row of labels, then a row of space-separated values).
+//   Template B -- HCA Healthcare / PointClickCare-style care-coordination
+//     referrals (colon-delimited "Label:   Value" pairs).
+// Each function below tries Template A first, then falls back to Template B.
+// A referral that matches neither will simply come back with fewer rows --
+// nothing is guessed, every value here is text literally present in the PDF.
+function extractDemographics(sources){
+  const rows = [];
+  const full = (sources || []).map(([, t]) => t).join('\n');
+
+  const header = full.match(/([A-Za-z][A-Za-z' -]+,\s*[A-Za-z][A-Za-z' -]+)\s*(?:["“][^"”\n]*["”]\s*)?MR#\s*(\d+)\s*\((\d{1,3})\s*y\.o\.\s*([MF])\)\s*\(Adm:\s*([\d/]+)\s+(\d{3,4})\)/);
+  const altName = !header ? full.match(/Name:\s+([^\n]+?)\s{2,}MRN:\s+([^\n]+)/) : null;
+  const pktHeader = (!header && !altName) ? full.match(/([A-Za-z][A-Za-z' .-]+,\s*[A-Za-z][A-Za-z'. -]+)\n\s*MRN:\s*(\d+),\s*DOB:\s*([\d/]+),\s*Legal Sex:\s*([MF])/) : null;
+  const csnHeader = (!header && !altName && !pktHeader) ? full.match(/([A-Za-z][A-Za-z' -]+,\s*[A-Za-z][A-Za-z' -]+)\s*#(\d+)\s*\(CSN:\s*\d+\)\s*\((\d{1,3})\s*y\.o\s*([MF])\)/) : null;
+
+  if (header) {
+    rows.push(['Patient name', normalizeWs(header[1]), 1]);
+    rows.push(['Medical record #', header[2], 1]);
+    rows.push(['Gender identity', header[4] === 'F' ? 'Female' : (header[4] === 'M' ? 'Male' : header[4]), 0]);
+  } else if (altName) {
+    rows.push(['Patient name', titleCaseFacility(joinWrapped(altName[1])), 1]);
+    rows.push(['Medical record #', joinWrapped(altName[2]), 1]);
+    const altSex = full.match(/Sex at Birth:\s+([A-Za-z]+)/);
+    if (altSex) rows.push(['Gender identity', altSex[1], 0]);
+  } else if (pktHeader) {
+    rows.push(['Patient name', normalizeWs(pktHeader[1]), 1]);
+    rows.push(['Medical record #', pktHeader[2], 1]);
+    rows.push(['Gender identity', pktHeader[4] === 'F' ? 'Female' : (pktHeader[4] === 'M' ? 'Male' : pktHeader[4]), 0]);
+  } else if (csnHeader) {
+    rows.push(['Patient name', normalizeWs(csnHeader[1]), 1]);
+    rows.push(['Medical record #', csnHeader[2], 1]);
+    rows.push(['Gender identity', csnHeader[4] === 'F' ? 'Female' : (csnHeader[4] === 'M' ? 'Male' : csnHeader[4]), 0]);
+  }
+
+  let stacked = {};
+  if (!header && !altName) {
+    stacked = extractStackedFields(full, [
+      { key: 'address', label: /\bAddress\b\n/ },
+      { key: 'phone', label: /\bPhone\s+Numbers\b\n|\bPhone\b\n/ },
+      { key: 'email', label: /\bEmail\b\n/ },
+      { key: 'sex', label: /\bSex\b\n/ },
+      { key: 'dob', label: /\bDate of Birth\b\n/ },
+      { key: 'employer', label: /\bEmployer\b\n/ },
+      { key: 'pcp', label: /\bPCP\b\n/ },
+      { key: 'marital', label: /\bMarital Status\b\n/ },
+      { key: 'religion', label: /\bReligion\b\n/ },
+      { key: 'ssn', label: /\bSSN\b\n/ },
+    ]);
+    if (stacked.sex && !csnHeader) rows.push(['Gender identity', stacked.sex, 0]);
+  }
+
+  const dob = pktHeader ? { 1: pktHeader[3] } : full.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})\s*\(\s*(\d{1,3})\s*\n?\s*(?:yrs?|years?)\)/);
+  if (dob && dob[2]) {
+    rows.push(['Date of birth', `${dob[1]} (${dob[2]} yrs)`, 1]);
+  } else if (dob && dob[1] && !dob[2]) {
+    rows.push(['Date of birth', dob[1], 1]);
+  } else if (stacked.dob) {
+    rows.push(['Date of birth', stacked.dob, 1]);
+  }
+
+  const ssn = full.match(/(xxx-xx-\d{4})/i);
+  if (ssn) {
+    rows.push(['SSN (masked)', ssn[1], 0]);
+  } else if (stacked.ssn) {
+    const cleanSsn = stacked.ssn.match(/\d{3}-\d{2}-(\d{4})/);
+    if (cleanSsn) rows.push(['SSN (masked)', `xxx-xx-${cleanSsn[1]}`, 0]);
+  }
+
+  const addrM = bestAddressMatch(full);
+  if (addrM) {
+    rows.push(['Home address', `${normalizeWs(addrM[1])}, ${normalizeWs(addrM[2])}`, 0]);
+  } else if (!header) {
+    const altAddr = full.match(/Address:\s+([\s\S]*?)\n\s*(?:Home:|Work:|Alt:)/);
+    if (altAddr) rows.push(['Home address', joinWrapped(altAddr[1]), 0]);
+    else if (stacked.address) rows.push(['Home address', stacked.address, 0]);
+  }
+
+  const phone = full.match(/(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\s*\(([MHW])\)/);
+  if (phone) {
+    rows.push(['Phone', `${phone[1]} (${phone[2]})`, 0]);
+  } else if (!header) {
+    const altPhone = full.match(/(?:Home|Work|Alt):\s*\n?\s*(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/);
+    if (altPhone) {
+      rows.push(['Phone', altPhone[1], 0]);
+    } else if (stacked.phone) {
+      const cleanPhone = stacked.phone.replace(/-\s+/g, '-').match(/\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/);
+      if (cleanPhone) rows.push(['Phone', cleanPhone[0], 0]);
+    }
+  }
+
+  const email = full.match(/([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/);
+  if (email) rows.push(['Email', email[1], 0]);
+
+  const maritalBlock = full.match(/Marital\s+Status\s+Religion\s+Alias\s+Language\s*\n([\s\S]{0,250}?)\n\s*Emergency\s+Contact/);
+  if (maritalBlock) {
+    const chunk = maritalBlock[1];
+    const marital = chunk.match(/\b(Married|Single|Widowed|Divorced|Separated|Life Partner|Domestic Partner|Unknown)\b/);
+    if (marital) rows.push(['Marital status', marital[1], 0]);
+    const lang = chunk.match(/\b(English|Spanish|Vietnamese|Mandarin|Cantonese|French|Arabic|Portuguese|Russian|Korean|Tagalog)\b/);
+    if (lang) rows.push(['Preferred language', lang[1], 0]);
+  } else if (!header) {
+    const altMarital = full.match(/Marital Status:\s+([A-Za-z ]+?)\s{2,}SSN:/);
+    if (altMarital) rows.push(['Marital status', altMarital[1].trim(), 0]);
+    else if (stacked.marital) rows.push(['Marital status', stacked.marital, 0]);
+  }
+  if (stacked.religion) rows.push(['Religion', stacked.religion, 0]);
+  if (stacked.employer) rows.push(['Employer', stacked.employer, 0]);
+  if (stacked.pcp) rows.push(['PCP', stacked.pcp, 0]);
+
+  if (maritalBlock || header) {
+    const ecRe = /([A-Z][a-zA-Z'-]+\s+[A-Z][a-zA-Z'-]+)\s*\(([A-Za-z]+)\)\s*\n\s*(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\s*\(([MHW])\)/g;
+    const contacts = [];
+    let ecMatch;
+    while ((ecMatch = ecRe.exec(full)) && contacts.length < 4) contacts.push(`${ecMatch[1]} (${ecMatch[2]}) ${ecMatch[3]}`);
+    if (contacts.length) rows.push(['Emergency contacts', contacts.join('; '), 0]);
+  } else {
+    const altEc = full.match(/Emergency Contact 1:\s+([^\n]+)[\s\S]{0,150}?Relationship:\s*([^\n]+)[\s\S]{0,80}?Home:\s*([()\d\s-]{7,20})/);
+    if (altEc) rows.push(['Emergency contacts', `${joinWrapped(altEc[1])} (${altEc[2].trim()}) ${altEc[3].trim()}`, 0]);
+  }
+
+  const referral = full.match(/PURE\s*HEALTH[^\n]*(?:TRANSITIONAL CARE|REHAB|SNF)[^\n]*/i);
+  if (referral) rows.push(['Referral source', titleCaseFacility(normalizeWs(referral[0])), 1]);
+
+  return rows;
+}
+
+function extractClinical(sources){
+  const rows = [];
+  const full = (sources || []).map(([, t]) => t).join('\n');
+
+  const provBlock = full.match(/Attending\s+Provider\s+Admitting\s+Provider\s+Admission\s+Type\s+Admission\s+Status\s*\n([^\n]+)/);
+  if (provBlock) {
+    const tok = provBlock[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    if (tok[0]) rows.push(['Attending provider', tok[0], 1]);
+    if (tok[1]) rows.push(['Admitting provider', tok[1], 1]);
+    if (tok[2]) rows.push(['Admission type', tok[2], 0]);
+    if (tok[3]) rows.push(['Admission status', tok[3], 0]);
+  }
+
+  const dateBlock = full.match(/Admission\s+Date\/Time\s+Inpatient\s+Admission\s+Date\/Time\s+Discharge\s+Date\/Time\s+Hospital\s+Service\s*\n([^\n]+)/);
+  if (dateBlock) {
+    const tok = dateBlock[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    const isDT = s => /^\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{3,4}$/.test(s);
+    if (tok.length >= 3 && isDT(tok[0]) && isDT(tok[1])) {
+      const admitDt = tok[0], inpatientDt = tok[1];
+      let dischargeDt = '', service = '';
+      if (tok.length >= 4 && isDT(tok[2])) { dischargeDt = tok[2]; service = tok[3] || ''; }
+      else { service = tok[2] || ''; }
+      rows.push(['Hospital admission date', inpatientDt ? `${admitDt} (inpatient ${inpatientDt})` : admitDt, 1]);
+      if (dischargeDt) rows.push(['Discharge date', dischargeDt, 0]);
+      if (service) rows.push(['Hospital service', service, 0]);
+    }
+  }
+
+  const areaBlock = full.match(/Hospital\s+Area\s+Unit\s+Room\/Bed\s+Auth\/Cert\s+Status\s*\n([^\n]+)/);
+  if (areaBlock) {
+    const tok = areaBlock[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    if (tok[1]) rows.push(['Hospital unit', tok[1], 0]);
+    if (tok[2]) rows.push(['Hospital room/bed', tok[2], 0]);
+  }
+
+  if (!provBlock) {
+    const acct = full.match(/Account #:\s+([\s\S]*?)\n\s*Patient Type:/);
+    if (acct) rows.push(['Hospital account #', joinWrapped(acct[1]), 0]);
+    const patientType = full.match(/Patient Type:\s+([^\n]+)/);
+    if (patientType) rows.push(['Admission type', patientType[1].trim(), 0]);
+    const arrival = full.match(/Arrival Date\/Time:\s+([\s\S]*?)\n\s*Projected Discharge/);
+    if (arrival) rows.push(['Hospital admission date', joinWrapped(arrival[1]), 1]);
+    const diagnosis = full.match(/Primary Diagnosis:\s+([^\n]+)/);
+    if (diagnosis) rows.push(['Primary diagnosis (as documented)', diagnosis[1].trim(), 0]);
+    const sendingFacility = full.match(/Sending\s+Facility:\s+([^\n]+)/);
+    if (sendingFacility) rows.push(['Sending facility', sendingFacility[1].trim(), 1]);
+  }
+
+  return rows;
+}
+
+
+function extractInsurance(sources){
+  const rows = [];
+  const full = (sources || []).map(([, t]) => t).join('\n');
+
+  const payer = full.match(/F\/O Payor\/Plan\b[^\n]*\n([^\n]+)/);
+  if (payer) rows.push(['Primary insurance', normalizeWs(payer[1]), 1]);
+
+  const sub = full.match(/Subscriber\s+(?:Relation\s+to\s+Pt\s+)?Subscriber\s*#\s*\n([^\n]+)/);
+  if (sub) {
+    const tok = sub[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    if (tok.length) rows.push(['Subscriber ID', tok[tok.length - 1], 0]);
+  }
+
+  const areaBlock2 = full.match(/Hospital\s+Area\s+Unit\s+Room\/Bed\s+Auth\/Cert\s+Status\s*\n([^\n]+)/);
+  if (areaBlock2) {
+    const tok = areaBlock2[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    if (tok[3]) rows.push(['Authorization', tok[3], 0]);
+  }
+
+  const acct2 = full.match(/Hospital Account #(\d+)/);
+  if (acct2) rows.push(['Hospital account #', acct2[1], 0]);
+
+  if (!payer) {
+    const planDesc = full.match(/Plan Description:\s+([^\n]+)/);
+    if (planDesc) rows.push(['Primary insurance', planDesc[1].trim(), 1]);
+    const planNum = full.match(/Plan Number:\s+([^\n]+)/);
+    if (planNum) rows.push(['Plan / subscriber number', planNum[1].trim(), 0]);
+    const financialClass = full.match(/Financial Class:\s+([^\n]+)/);
+    if (financialClass) rows.push(['Financial class', financialClass[1].trim(), 0]);
+  }
+
+  if (!payer && !sub) {
+    const inlineSub = full.match(/Subscriber:\s+([^\n]+?)\s{2,}Subscriber#:\s+([^\n]+)/);
+    if (inlineSub) rows.push(['Subscriber ID', inlineSub[2].trim(), 0]);
+    const groupNum = full.match(/Group#:\s+([^\n]+)/);
+    if (groupNum) rows.push(['Group #', groupNum[1].split(/\s{2,}/)[0].trim(), 0]);
+  }
+
+  return rows;
+}
+
+function extractIVDocumentation(sources){
+  const ivRe = /\b(peripheral (?:line|iv|access)|picc(?:\s*line)?|central line|saline lock|hep-?lock|iv (?:push|fluids?|medications?|site|access|antibiotics|bolus|drip|infusion)|midline catheter|vascular access)\b/i;
+  const out = [];
+  (sources || []).forEach(([pageLabel, text]) => {
+    text.split(/\r?\n/).forEach(line => {
+      const t = normalizeWs(line);
+      if (t && ivRe.test(t)) out.push(['IV / vascular access', t, formatPages([pageLabel])]);
+    });
+  });
+  return out;
+}
+
 function pageNumsFromLabels(labels){
   return labels.map(l => (String(l).match(/\d+/) || [])[0]).filter(Boolean);
 }
@@ -874,6 +1310,13 @@ function renderFindings(key){
   document.getElementById('findKeywords').innerHTML = kws.length
     ? kws.map(m => `<div class="finding-item"><div class="finding-item-top"><span class="fcode">${escapeHtml(m.keyword)}</span><span class="fpage">${linkifyPageRefs(formatPages(m.pages), p.pdfUrl)}</span></div></div>`).join("")
     : `<div class="finding-empty">No additional keywords found in this packet.</div>`;
+
+  const nursingCats = buildNursingCategoryMatches(p.sources);
+  const nursingCount = nursingCats.reduce((sum, c) => sum + c.conditions.length, 0);
+  document.getElementById('countNursing').textContent = nursingCount || '';
+  document.getElementById('findNursing').innerHTML = nursingCats.length
+    ? nursingCats.map(cat => `<div class="nursing-cat-group"><div class="nursing-cat-title">${escapeHtml(cat.label)}</div>${cat.conditions.map(c => `<div class="finding-item"><div class="finding-item-top"><span class="fcode${c.status === 'possible' ? ' fcode-possible' : ''}">${escapeHtml(c.label)}</span><span class="fpage">${linkifyPageRefs(formatPages(c.pages), p.pdfUrl)}</span></div>${c.detail ? `<div class="fdesc">${escapeHtml(c.detail)}</div>` : ''}${c.manualNote ? `<div class="fnote">&#9888; ${escapeHtml(c.manualNote)}</div>` : ''}</div>`).join("")}</div>`).join("")
+    : `<div class="finding-empty">No nursing category keywords or conditions found in this packet.</div>`;
 
   const teamsMatches = extractTeamsMatches(p.sources);
   document.getElementById('countTeams').textContent = teamsMatches.length || '';
@@ -1227,16 +1670,23 @@ async function loadUploads(){
 }
 
 function buildUploadedPatient(name, sources, uploadedAt, numPages, pdfUrl){
-  const initials = name.split(/[\s,]+/).filter(Boolean).slice(0,2).map(w => w[0]).join('').toUpperCase() || 'DOC';
+  const demographic = extractDemographics(sources);
+  const insurance = extractInsurance(sources);
+  const clinical = extractClinical(sources);
+  const ivDocs = extractIVDocumentation(sources);
+  const nameRow = demographic.find(r => r[0] === 'Patient name');
+  const displayName = nameRow ? nameRow[1] : name;
+  const initials = displayName.split(/[\s,]+/).filter(Boolean).slice(0,2).map(w => w[0]).join('').toUpperCase() || 'DOC';
+  const primaryInsRow = insurance.find(r => r[0] === 'Primary insurance');
   return {
-    name, initials, ins: 'Uploaded document', facility: '', age: '', flagged: false, reviewNote: '', pdfUrl,
+    name: displayName, initials, ins: (primaryInsRow && primaryInsRow[1]) || 'Uploaded document', facility: '', age: '', flagged: false, reviewNote: '', pdfUrl,
     meds: [],
     runLabel: `Uploaded ${new Date(uploadedAt).toLocaleString()} &middot; ${numPages}-page PDF`,
-    demographic: [], insurance: [], clinical: [],
+    demographic, insurance, clinical,
     diagCaption: 'Automatically matched against the PDPM ICD-10 mapping below',
     diagnoses: [],
-    diagNote: 'Structured demographic, insurance, and clinical fields are not auto-populated for uploaded documents in this prototype &mdash; see the ICD-10 and Keyword panels for automatic findings, and the source pages on the right for full verbatim text.',
-    ivDocs: [],
+    diagNote: 'Diagnosis codes below are only ones that literally appear in this document&rsquo;s text, matched against the PDPM ICD-10 mapping &mdash; nothing here is inferred or coded. Demographic, insurance, and clinical fields above use best-effort pattern matching against this document&rsquo;s layout and may be incomplete for referral formats PureInsights hasn&rsquo;t seen before &mdash; verify against the source pages on the right.',
+    ivDocs,
     sources
   };
 }
@@ -1260,6 +1710,29 @@ async function handleUpload(file){
   return handleUploadLocal(file);
 }
 
+// pdf.js hands back a flat list of text fragments per page with no line
+// breaks of its own -- naively joining them with a space collapses an
+// entire page into one giant paragraph, which breaks any extraction logic
+// that looks at individual lines (e.g. extractProcedureSurgical). Rebuild
+// line breaks by watching for jumps in the fragment's Y position (transform[5]),
+// the same heuristic pdf.js's own text-layer renderer uses.
+function pageItemsToText(items){
+  const lines = [];
+  let currentLine = [];
+  let lastY = null;
+  items.forEach(item => {
+    const y = item.transform ? item.transform[5] : null;
+    if (lastY !== null && y !== null && Math.abs(y - lastY) > 2) {
+      lines.push(currentLine.join(' '));
+      currentLine = [];
+    }
+    if (item.str !== '' || currentLine.length) currentLine.push(item.str);
+    if (y !== null) lastY = y;
+  });
+  if (currentLine.length) lines.push(currentLine.join(' '));
+  return lines.join('\n');
+}
+
 async function handleUploadLocal(file){
   const statusEl = document.getElementById('uploadStatus');
   statusEl.classList.add('show');
@@ -1272,7 +1745,7 @@ async function handleUploadLocal(file){
       statusEl.textContent = `Extracting page ${i} of ${pdf.numPages} from ${file.name}...`;
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
-      const text = content.items.map(it => it.str).join(' ');
+      const text = pageItemsToText(content.items);
       sources.push([`PDF page ${i}`, text]);
     }
     const key = 'doc_' + Date.now();
@@ -1348,6 +1821,10 @@ dz.addEventListener('drop', e => {
        never MDS coding instructions.
    ================================================================ */
 
+// The 4 patients baked into the base app's code (never uploaded, never
+// deletable) — used to tell "uploaded document" keys apart from these.
+const ARD_DEMO_KEYS = ['ford','craul','glasco','dickinson'];
+
 let MODE = 'referral';            // 'referral' | 'ard'
 let ARD_STATE = {};                // key -> { [findingId]: {status, note, reviewer, updatedAt} }
 let ARD_DATE_BY_KEY = {};          // key -> optional ARD date string entered by staff
@@ -1388,12 +1865,77 @@ async function loadArdState(key){
   ARD_STATE_LOADED[key] = true;
 }
 
+function deleteArdStateRecord(key){
+  return openArdDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(ARD_DB_STORE, 'readwrite');
+    tx.objectStore(ARD_DB_STORE).delete(key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  })).catch(e => console.warn('Could not delete stored MDS ARD Review state:', e));
+}
+
+/* ---------------------------------------------------------------
+   Clear uploaded PDFs — additive: reuses the existing pureinsights_pdfs
+   IndexedDB store/functions (openDb/DB_STORE) exactly as they already
+   exist for saving uploads, just to delete instead of put. Never
+   touches the 4 built-in demo patients.
+   --------------------------------------------------------------- */
+function deleteUpload(key){
+  return openDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).delete(key);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  })).catch(e => console.warn('Could not delete stored upload:', e));
+}
+
+async function clearUploadedDocuments(){
+  const uploadedKeys = Object.keys(PATIENTS).filter(k => !ARD_DEMO_KEYS.includes(k));
+  if (!uploadedKeys.length) {
+    alert('No uploaded PDFs to clear — only the built-in demo patients are loaded.');
+    return;
+  }
+  const ok = window.confirm(
+    `Remove ${uploadedKeys.length} uploaded PDF${uploadedKeys.length === 1 ? '' : 's'} from this browser?\n\n` +
+    `This deletes them (and any MDS ARD Review status/notes on them) from this device. It cannot be undone. ` +
+    `The 4 built-in demo patients are not affected.`
+  );
+  if (!ok) return;
+
+  for (const key of uploadedKeys) {
+    const p = PATIENTS[key];
+    if (p && p.pdfUrl && String(p.pdfUrl).startsWith('blob:')) {
+      try { URL.revokeObjectURL(p.pdfUrl); } catch (e) {}
+    }
+    await deleteUpload(key);
+    await deleteArdStateRecord(key);
+    delete PATIENTS[key];
+    delete ARD_STATE[key];
+    delete ARD_STATE_LOADED[key];
+    delete ARD_DATE_BY_KEY[key];
+  }
+
+  if (!PATIENTS[current]) current = ARD_DEMO_KEYS[0];
+  await selectPatient(current);
+
+  const statusEl = document.getElementById('uploadStatus');
+  if (statusEl) {
+    statusEl.textContent = `Cleared ${uploadedKeys.length} uploaded PDF${uploadedKeys.length === 1 ? '' : 's'} from this browser.`;
+    statusEl.classList.add('show');
+    setTimeout(() => statusEl.classList.remove('show'), 5000);
+  }
+}
+
 async function saveArdState(key){
   try{
     const db = await openArdDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(ARD_DB_STORE, 'readwrite');
-      tx.objectStore(ARD_DB_STORE).put({key, findings: ARD_STATE[key] || {}, ardDate: ARD_DATE_BY_KEY[key] || ''});
+      tx.objectStore(ARD_DB_STORE).put({
+        key,
+        findings: ARD_STATE[key] || {},
+        ardDate: ARD_DATE_BY_KEY[key] || ''
+      });
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
@@ -1493,8 +2035,29 @@ function ardJumpToSource(key, pageLabel){
 /* ================================================================
    HEADER / DEMOGRAPHICS / PRIMARY-DRIVER PARSING
    ================================================================ */
+// The base app's PDF text extraction now preserves real line breaks
+// (it rebuilds them from pdf.js's per-item Y position so the Referral
+// Packet Analysis view's own demographic/insurance/clinical field
+// parsing can rely on them). Every ARD label/value regex below was
+// built and tested against the OLD flattened, single-line-per-page
+// text, so a label or value that now happens to wrap across a real
+// line break (e.g. "Anticipated Discharge\nDisposition") would silently
+// fail to match. Rather than hand-edit every regex, the ARD engine
+// works off its own normalized copy of the page text — real newlines
+// collapsed back to single spaces — cached on the patient object so
+// it's only computed once per document. This never touches p.sources
+// itself, so the base app's own newline-aware extraction is unaffected.
+function ardSourcesOf(p){
+  const raw = p.sources || [];
+  if (p._ardNormSrc && p._ardNormSrcRef === raw) return p._ardNormSrc;
+  const norm = raw.map(s => [s[0], String(s[1] || '').replace(/\s+/g, ' ')]);
+  p._ardNormSrc = norm;
+  p._ardNormSrcRef = raw;
+  return norm;
+}
+
 function ardFullText(p){
-  return (p.sources || []).map(s => s[1]).join(' ⏎ ');
+  return ardSourcesOf(p).map(s => s[1]).join(' ⏎ ');
 }
 
 function ardFirstMatch(text, re){
@@ -1521,7 +2084,7 @@ function ardParseHeader(p){
     numPages: (p.sources || []).length
   };
 
-  const banner = ardFindWithPage(p.sources, /([A-Z][A-Za-z'’\-]+),\s*([A-Z][A-Za-z'’\-]+)\s*#(\d+)\s*\(CSN:\s*(\d+)\)\s*\((\d{1,3})\s*y\.?o\.?\s*([MF])\)\s*\(Adm:\s*([\d\/]+)\)/);
+  const banner = ardFindWithPage(ardSourcesOf(p), /([A-Z][A-Za-z'’\-]+),\s*([A-Z][A-Za-z'’\-]+)\s*#(\d+)\s*\(CSN:\s*(\d+)\)\s*\((\d{1,3})\s*y\.?o\.?\s*([MF])\)\s*\(Adm:\s*([\d\/]+)\)/);
   if (banner) {
     header.name = `${banner.match[1]}, ${banner.match[2]}`;
     header.mrn = banner.match[3];
@@ -1530,7 +2093,7 @@ function ardParseHeader(p){
     header.admDate = banner.match[7];
   }
 
-  const dob = ardFindWithPage(p.sources, /Date of Birth\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  const dob = ardFindWithPage(ardSourcesOf(p), /Date of Birth\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
   if (dob) header.dob = dob.match[1];
   if (!header.age && header.dob) {
     const parts = header.dob.split('/');
@@ -1545,19 +2108,19 @@ function ardParseHeader(p){
     }
   }
 
-  const hosp = ardFindWithPage(p.sources, /\b([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3}\s+Hospital)\b/);
+  const hosp = ardFindWithPage(ardSourcesOf(p), /\b([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3}\s+Hospital)\b/);
   if (hosp) header.hospital = hosp.match[1];
 
   if (!header.admDate) {
-    const adm = ardFindWithPage(p.sources, /Admission at\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    const adm = ardFindWithPage(ardSourcesOf(p), /Admission at\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
     if (adm) header.admDate = adm.match[1];
   }
 
-  const disch = ardFindWithPage(p.sources, /Discharge(?: at| Date)\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  const disch = ardFindWithPage(ardSourcesOf(p), /Discharge(?: at| Date)\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
   if (disch) header.dischargeDate = disch.match[1];
 
-  const dispo = ardFindWithPage(p.sources, ARD_DISCHARGE_DISPO_RE);
-  if (dispo) header.snfDestination = dispo.match[1].trim();
+  const dispo = ardFindWithPage(ardSourcesOf(p), ARD_DISCHARGE_DISPO_RE);
+  if (dispo) header.snfDestination = dispo.match[1].replace(/\s+/g, ' ').trim();
 
   // PDF text-extraction order follows the file's content stream, not
   // necessarily the page's visual layout — a section heading like
@@ -1566,7 +2129,7 @@ function ardParseHeader(p){
   // vocabulary per page instead of anchoring on a heading's proximity.
   const payerKeywords = ['MEDICARE','MEDICAID','AETNA','HUMANA','UNITEDHEALTHCARE','CIGNA','BLUE CROSS','BLUE SHIELD','TRICARE','KAISER','COMMERCIAL'];
   outer:
-  for (const [pageLabel, text] of (p.sources || [])) {
+  for (const [pageLabel, text] of ardSourcesOf(p)) {
     for (const kw of payerKeywords) {
       const idx = text.indexOf(kw);
       if (idx === -1) continue;
@@ -1576,20 +2139,20 @@ function ardParseHeader(p){
     }
   }
 
-  const chief = ardFindWithPage(p.sources, /Chief Complaints?:\s*([^⏎]{5,140}?)(?:\.|HPI|$)/i);
+  const chief = ardFindWithPage(ardSourcesOf(p), /Chief Complaints?:\s*([^⏎]{5,140}?)(?:\.|HPI|$)/i);
   if (chief) header.reason = chief.match[1].replace(/^\d+\.\s*/, '').trim();
 
-  const proc = ardFindWithPage(p.sources, /Procedure:\s*([^⏎]{4,80}?)(?=\s*Anesthesia|\s*Surgeon:|\.|$)/i);
+  const proc = ardFindWithPage(ardSourcesOf(p), /Procedure:\s*([^⏎]{4,80}?)(?=\s*Anesthesia|\s*Surgeon:|\.|$)/i);
   if (proc) header.procedure = proc.match[1].trim();
   if (!header.procedure) {
-    const postop = ardFindWithPage(p.sources, /Postoperative Diagnosis:\s*([A-Za-z0-9 \-\/]{4,80})/i);
+    const postop = ardFindWithPage(ardSourcesOf(p), /Postoperative Diagnosis:\s*([A-Za-z0-9 \-\/]{4,80})/i);
     if (postop) header.procedure = postop.match[1].trim();
   }
 
-  const procDate = ardFindWithPage(p.sources, /Date of Surgical Procedure\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  const procDate = ardFindWithPage(ardSourcesOf(p), /Date of Surgical Procedure\s*[:\-]?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
   if (procDate) header.procedureDate = procDate.match[1];
   if (!header.procedureDate) {
-    const surg = ardFindWithPage(p.sources, /Surgery at\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    const surg = ardFindWithPage(ardSourcesOf(p), /Surgery at\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
     if (surg) header.procedureDate = surg.match[1];
   }
 
@@ -1609,9 +2172,9 @@ const ARD_PROCEDURE_CATEGORY_MAP = [
 function ardBuildPrimaryDriver(p, header){
   const driver = {procedure: header.procedure || 'Not found in uploaded packet', procedureDate: header.procedureDate || 'Not found in uploaded packet', category: null, icd: null, evidence: [], pages: []};
   const icds = extractICDMatches(p.sources);
-  const opNote = ardFindWithPage(p.sources, /(Preoperative|Postoperative) Diagnosis:\s*([^⏎]{4,100})/i);
+  const opNote = ardFindWithPage(ardSourcesOf(p), /(Preoperative|Postoperative) Diagnosis:\s*([^⏎]{4,100})/i);
   if (opNote) { driver.evidence.push(opNote.snippet); driver.pages.push(opNote.page); }
-  const hpi = ardFindWithPage(p.sources, /HPI\s*:\s*([^⏎]{10,220})/i);
+  const hpi = ardFindWithPage(ardSourcesOf(p), /HPI\s*:\s*([^⏎]{10,220})/i);
   if (hpi) { driver.evidence.push(hpi.snippet); driver.pages.push(hpi.page); }
   if (header.procedure) {
     for (const m of ARD_PROCEDURE_CATEGORY_MAP) { if (m.re.test(header.procedure)) { driver.category = m.category; break; } }
@@ -1783,7 +2346,7 @@ const ARD_SIMPLE_RULES = [
 function ardRunSimpleRules(p){
   const findings = [];
   ARD_SIMPLE_RULES.forEach(rule => {
-    const hits = ardFindTerms(p.sources, rule.terms);
+    const hits = ardFindTerms(ardSourcesOf(p), rule.terms);
     if (!hits.length) return;
     const byPage = new Map();
     hits.forEach(h => { if (!byPage.has(h.page)) byPage.set(h.page, h.snippet); });
@@ -1812,7 +2375,7 @@ function ardDetectOrthostaticHypotension(p){
   // versioned notes — and that should read as ONE clinical event with
   // several source pages, not several separate findings).
   const perPage = [];
-  (p.sources || []).forEach(([pageLabel, text]) => {
+  (ardSourcesOf(p) || []).forEach(([pageLabel, text]) => {
     const readings = [];
     let m;
     const re = /(\d{2,3})\s*\/\s*(\d{2,3})/g;
@@ -1863,7 +2426,7 @@ function ardDetectOrthostaticHypotension(p){
   }
 
   // Historical episodes even without in-visit numbers (e.g., patient-reported history)
-  const historyHits = ardFindTerms(p.sources, ['sudden drops in blood pressure','loop recorder','used to happen','episodes of bp drops and passing out']);
+  const historyHits = ardFindTerms(ardSourcesOf(p), ['sudden drops in blood pressure','loop recorder','used to happen','episodes of bp drops and passing out']);
   if (historyHits.length && !findings.length) {
     findings.push(ardMakeFinding({
       id: 'safety-orthostatic-history', title: 'Historical Episodes of Blood Pressure Drops / Passing Out', priority: 'validate',
@@ -1891,7 +2454,7 @@ const ARD_DISCHARGE_DISPO_RE = /Anticipated Discharge Disposition\s*([^⏎]{2,90
 function ardDetectMultipleSclerosis(p){
   const re = /Multiple Sclerosis|\bMS\b/;
   const hits = [];
-  (p.sources || []).forEach(([pageLabel, text]) => {
+  (ardSourcesOf(p) || []).forEach(([pageLabel, text]) => {
     const m = text.match(re);
     if (m) hits.push({page: pageLabel, snippet: ardContext(text, m.index, m[0].length)});
   });
@@ -1912,7 +2475,7 @@ function ardDetectMultipleSclerosis(p){
 
 /* ---------------- Discharge-planning conflict (composite) ---------------- */
 function ardDetectDischargeConflict(p){
-  const hits = ardScanRegex(p.sources, ARD_DISCHARGE_DISPO_RE);
+  const hits = ardScanRegex(ardSourcesOf(p), ARD_DISCHARGE_DISPO_RE);
   if (hits.length < 2) return {finding: null, conflict: null};
   const distinct = new Map();
   hits.forEach(h => {
@@ -1939,7 +2502,7 @@ const ARD_ASSIST_LEVELS = ['Independent','Supervision','Setup','Minimum Assist',
 
 function ardParseFunctionalTable(p){
   const rows = [];
-  (p.sources || []).forEach(([pageLabel, text]) => {
+  (ardSourcesOf(p) || []).forEach(([pageLabel, text]) => {
     ARD_GG_FIELDS.forEach(field => {
       const idx = text.indexOf(field);
       if (idx === -1) return;
@@ -1970,7 +2533,7 @@ function ardParsePriorLevelOfFunction(p){
     {label: 'Caregiver availability', terms: ['lives with spouse','all the time','spouse/significant other']}
   ];
   patterns.forEach(pat => {
-    const hits = ardFindTerms(p.sources, pat.terms);
+    const hits = ardFindTerms(ardSourcesOf(p), pat.terms);
     if (hits.length) items.push({label: pat.label, page: hits[0].page, snippet: hits[0].snippet});
   });
   return items;
@@ -2014,7 +2577,7 @@ function ardParseMedications(p){
   const full = ardFullText(p);
   const rows = [];
   ARD_HIGH_RISK_MEDS.forEach(med => {
-    const hit = ardFindWithPage(p.sources, med.re);
+    const hit = ardFindWithPage(ardSourcesOf(p), med.re);
     if (!hit) return;
     const idx = full.search(med.re);
     const window_ = idx !== -1 ? full.slice(idx, idx + 200) : '';
@@ -2051,7 +2614,7 @@ function ardBuildDiagnosesTable(p){
   // So every named-condition match defaults to "Validate During ARD"
   // and is only upgraded to "Supported" when the surrounding text is
   // unambiguously a current assessment/plan with no historical framing.
-  (p.sources || []).forEach(([pageLabel, text]) => {
+  (ardSourcesOf(p) || []).forEach(([pageLabel, text]) => {
     ARD_NAMED_CONDITIONS.forEach(cond => {
       if (rows.some(r => r.diagnosis.toLowerCase().includes(cond.name.toLowerCase()))) return;
       const idx = text.search(cond.re);
