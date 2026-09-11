@@ -926,17 +926,75 @@ const PDPM_NURSING_CATEGORIES = [
   }
 ];
 
+// Negation guard: clinical narrative text routinely documents the ABSENCE
+// of a symptom ("denies any fever or chills... denies nausea or vomiting"),
+// and a plain substring search can't tell that apart from the symptom being
+// affirmatively present. Before counting a term as a hit, check the text
+// immediately before it, within the same sentence/line, for a negation cue
+// ("denies", "no", "without", "negative for", etc.) — if one is present, that
+// occurrence doesn't count, but a later non-negated occurrence of the same
+// term elsewhere on the page still does.
+const NURSING_NEGATION_RE = /\b(no|not|denies|denied|deny|denying|without|absent|negative for|ruled out|rule out|no history of|no evidence of|no signs? of|free of)\b/i;
+const NURSING_NEGATION_WINDOW = 45; // characters to look back, within the same sentence
+
+function nursingIsNegatedAt(lowerText, matchIndex){
+  const sentenceBoundary = Math.max(
+    lowerText.lastIndexOf('.', matchIndex),
+    lowerText.lastIndexOf(';', matchIndex),
+    lowerText.lastIndexOf('\n', matchIndex),
+    lowerText.lastIndexOf(':', matchIndex)
+  );
+  const windowStart = Math.max(sentenceBoundary + 1, matchIndex - NURSING_NEGATION_WINDOW);
+  return NURSING_NEGATION_RE.test(lowerText.slice(windowStart, matchIndex));
+}
+
+function nursingPageHasNonNegatedRegex(pageRaw, pageLower, re){
+  const globalRe = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+  let m;
+  while ((m = globalRe.exec(pageRaw)) !== null) {
+    if (!nursingIsNegatedAt(pageLower, m.index)) return true;
+    if (globalRe.lastIndex === m.index) globalRe.lastIndex++;
+  }
+  return false;
+}
+
+function nursingEscapeRegex(s){
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Word-boundary term matching: a plain substring search would let a short
+// term like "respirator" match inside an unrelated word like "respiratory"
+// (an extremely common H&P/ROS section header, unrelated to actual
+// ventilator use) — \b on both ends prevents that, for single words and
+// multi-word phrases alike. The trailing "(?:e?s)?" tolerates a simple
+// plural on the last word ("transfusion"/"transfusions", "ulcer"/"ulcers")
+// without reopening the respirator/respiratory hole, since that still
+// requires \b right after the optional suffix — "respiratory" has neither
+// "s" nor "es" after "respirator", so it still doesn't match.
+function nursingPageHasNonNegatedTerm(pageLower, pageRaw, term){
+  const re = new RegExp('\\b' + nursingEscapeRegex(term) + '(?:e?s)?\\b', 'gi');
+  return nursingPageHasNonNegatedRegex(pageRaw, pageLower, re);
+}
+
 function buildNursingCategoryMatches(sources){
-  const pages = (sources || []).map(([pageLabel, text]) => ({pageLabel, lower: String(text || '').toLowerCase(), raw: String(text || '')}));
+  // Whitespace-normalized (real newlines collapsed to single spaces), same
+  // reasoning as the ARD engine's ardSourcesOf(): pdf.js line-wraps can fall
+  // mid-sentence ("She denies \nany fever"), and a raw '\n' being treated as
+  // a hard sentence boundary would cut the negation lookback window off
+  // right between "denies" and its target — normalizing first prevents that.
+  const pages = (sources || []).map(([pageLabel, text]) => {
+    const norm = String(text || '').replace(/\s+/g, ' ');
+    return {pageLabel, lower: norm.toLowerCase(), raw: norm};
+  });
 
   function pagesMatchingAny(terms){
     const hit = [];
-    pages.forEach(pg => { if (terms.some(t => pg.lower.includes(t))) hit.push(pg.pageLabel); });
+    pages.forEach(pg => { if (terms.some(t => nursingPageHasNonNegatedTerm(pg.lower, pg.raw, t))) hit.push(pg.pageLabel); });
     return hit;
   }
   function pagesMatchingWordRe(res){
     const hit = [];
-    pages.forEach(pg => { if (res.some(re => re.test(pg.raw))) hit.push(pg.pageLabel); });
+    pages.forEach(pg => { if (res.some(re => nursingPageHasNonNegatedRegex(pg.raw, pg.lower, re))) hit.push(pg.pageLabel); });
     return hit;
   }
 
@@ -1027,6 +1085,7 @@ function bestAddressMatch(full){
 // works regardless of exactly how many lines the value wraps across.
 function extractStackedFields(text, fieldDefs){
   const matches = [];
+  const wrapKeys = new Set(fieldDefs.filter(f => f.wrap).map(f => f.key));
   fieldDefs.forEach(({key, label}) => {
     const m = label.exec(text);
     if (m) matches.push({key, start: m.index, end: m.index + m[0].length});
@@ -1035,10 +1094,115 @@ function extractStackedFields(text, fieldDefs){
   const result = {};
   matches.forEach((m, i) => {
     const nextStart = i + 1 < matches.length ? matches[i + 1].start : Math.min(text.length, m.end + 300);
-    const val = text.slice(m.end, nextStart).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    // A colon-delimited layout puts ":" directly after the label, before
+    // any separating whitespace -- skip it so the whitespace check below
+    // still applies the same way regardless of which layout this is.
+    let labelEnd = m.end;
+    if (text[labelEnd] === ':') labelEnd++;
+    // A single space or single newline right after the label is just the
+    // separator before ITS OWN value (works for both a "Label\nValue" layout
+    // and a "Label Value" same-line layout). Two-or-more whitespace chars in
+    // a row -- or a blank line -- means this label had no value of its own
+    // before the next field/label started, so there's nothing here to bleed
+    // that next field's text into.
+    const sepM = text.slice(labelEnd, nextStart).match(/^[ \t]|^\n/);
+    if (!sepM) return;
+    const valueStart = labelEnd + sepM[0].length;
+    if (/^\s/.test(text.slice(valueStart, nextStart))) return;
+    // Reuse the same known-label boundary detection as every colon-delimited
+    // capture elsewhere -- this is what stops, say, a "Marital Status:"
+    // value from swallowing "SSN:", "Race:", "Religion:" and everything
+    // else that follows it on a single continuous line with no real
+    // newline anywhere nearby. Capped at nextStart too, so this can never
+    // read past whichever OTHER field label was matched right after it.
+    const capped = text.slice(0, nextStart);
+    const val = wrapKeys.has(m.key) ? captureWrappedValue(capped, valueStart) : captureFieldValue(capped, valueStart);
     if (val && !(m.key in result)) result[m.key] = val;
   });
   return result;
+}
+
+// Labels seen used as colon-delimited or same-line field markers across every
+// referral layout PureInsights has been fed so far (Epic banners, HCA/PCC
+// care-coordination pages, flowsheet-style summaries). Used only as a
+// stopping point when reading "the rest of this field's value" -- so a run of
+// these packed onto one long line, with no real newline character anywhere
+// between them, can't have one field's captured value swallow the next five
+// fields' worth of text. This list only grows as new referral formats turn up
+// -- it never needs to be exhaustive to be useful.
+const KNOWN_FIELD_LABELS = [
+  'Date of Birth','Sex at Birth','Address','Home','Work','Alt','Marital Status',
+  'SSN','Race 2','Race','Ethnicity 2','Ethnicity','Religion','Gender Identity',
+  'Emergency Contact \\d+','Emergency Contact','Relationship',
+  'Admission Information','Referral #','Referral','MRN','Account #',
+  'Patient Type','Arrival Date/Time','Projected Discharge Date','Projected Discharge',
+  'Discharge Date','Patient Class','Admit Source','Service Type','Location',
+  'Facility','Level of Care','Primary Diagnosis','Initial DRG','Admitting Physician',
+  'Attending Provider','Admitting Provider','Sending Facility','Plan Description',
+  'Plan Number','Plan Provider Contact','Financial Class','Group Number','Group#',
+  'Precert#','Authorization#','Insured','Guarantor Employer','Guarantor',
+  'Employment Status',
+  'Effective Date','Subscriber#','Subscriber','Phone','Email','Employer','PCP',
+  'Name','Encounter Date','CSN','DOB'
+];
+const FIELD_BOUNDARY_RE = new RegExp('\\s+(?:' + KNOWN_FIELD_LABELS.join('|') + ')\\s*:', 'i');
+const LINE_IS_LABEL_RE = new RegExp('^\\s*(?:' + KNOWN_FIELD_LABELS.join('|') + ')\\s*:', 'i');
+const FIELD_VALUE_MAX = 160;
+
+// Reads "the rest of this field's value" starting at `start` in `text`,
+// stopping at the first real newline, the first sign of the NEXT known
+// label (so a whole run of colon-delimited fields packed onto one pdf.js
+// "line" can't blob into one giant value), or a hard length cap as a last
+// resort for a layout that hasn't been catalogued yet. Every call site below
+// already matched the field's own label; this just bounds what comes after.
+// Deliberately single-line: most fields' values really do end at the next
+// real newline, and treating every non-blank, non-label-looking line after
+// that as "still part of this value" (tried and reverted) swallows whatever
+// unrelated content happens to follow on the next line in a real document
+// far more often than it correctly continues a wrapped value. Only a field
+// that's actually expected to wrap (an address) uses captureWrappedValue
+// below instead.
+function captureFieldValue(text, start){
+  const win = text.slice(start, start + FIELD_VALUE_MAX + 60);
+  const nlIdx = win.indexOf('\n');
+  const boundaryM = FIELD_BOUNDARY_RE.exec(win);
+  let end = win.length;
+  if (nlIdx !== -1) end = Math.min(end, nlIdx);
+  if (boundaryM) end = Math.min(end, boundaryM.index);
+  end = Math.min(end, FIELD_VALUE_MAX);
+  return win.slice(0, end).replace(/\s+/g, ' ').trim();
+}
+
+// Same idea as captureFieldValue, but for the one kind of field that
+// legitimately wraps across several real newlines before the next label
+// starts on its own line: a street address. Keeps consuming lines as long
+// as each one doesn't look like the start of another known field and isn't
+// blank, up to a small cap -- a label that follows right after (Home:,
+// Work:, City/State/Zip:, etc.) still ends it on the very next line.
+function captureWrappedValue(text, start, maxLines){
+  const lines = text.slice(start, start + FIELD_VALUE_MAX * 2).split('\n');
+  const cap = maxLines || 4;
+  const pieces = [];
+  let used = 0;
+  // A line starting a numbered list item ("2. Patient's Information...") is
+  // how several intake-form layouts mark the start of the NEXT section, even
+  // when neither side is one of the specific labels catalogued above -- stop
+  // there too rather than pulling a whole new section into this value.
+  const SECTION_MARKER_RE = /^\s*\d+\.\s+[A-Z]/;
+  const SECTION_MARKER_INLINE_RE = /\s\d+\.\s+[A-Z]/;
+  for (let li = 0; li < lines.length && li < cap; li++) {
+    const line = lines[li];
+    if (li > 0 && (!line.trim() || LINE_IS_LABEL_RE.test(line) || SECTION_MARKER_RE.test(line))) break;
+    const boundaryM = FIELD_BOUNDARY_RE.exec(line);
+    const sectionM = SECTION_MARKER_INLINE_RE.exec(line);
+    const cutAt = boundaryM && sectionM ? Math.min(boundaryM.index, sectionM.index)
+      : (boundaryM ? boundaryM.index : (sectionM ? sectionM.index : -1));
+    const piece = cutAt === -1 ? line : line.slice(0, cutAt);
+    pieces.push(piece);
+    used += piece.length;
+    if (boundaryM || sectionM || used >= FIELD_VALUE_MAX) break;
+  }
+  return pieces.join(' ').replace(/\s+/g, ' ').trim().slice(0, FIELD_VALUE_MAX);
 }
 
 // PureInsights has seen two recurring real-world referral layouts so far:
@@ -1054,7 +1218,7 @@ function extractDemographics(sources){
   const full = (sources || []).map(([, t]) => t).join('\n');
 
   const header = full.match(/([A-Za-z][A-Za-z' -]+,\s*[A-Za-z][A-Za-z' -]+)\s*(?:["“][^"”\n]*["”]\s*)?MR#\s*(\d+)\s*\((\d{1,3})\s*y\.o\.\s*([MF])\)\s*\(Adm:\s*([\d/]+)\s+(\d{3,4})\)/);
-  const altName = !header ? full.match(/Name:\s+([^\n]+?)\s{2,}MRN:\s+([^\n]+)/) : null;
+  const altName = !header ? full.match(/Name:\s+([^\n]+?)\s{2,}MRN:\s*/) : null;
   const pktHeader = (!header && !altName) ? full.match(/([A-Za-z][A-Za-z' .-]+,\s*[A-Za-z][A-Za-z'. -]+)\n\s*MRN:\s*(\d+),\s*DOB:\s*([\d/]+),\s*Legal Sex:\s*([MF])/) : null;
   const csnHeader = (!header && !altName && !pktHeader) ? full.match(/([A-Za-z][A-Za-z' -]+,\s*[A-Za-z][A-Za-z' -]+)\s*#(\d+)\s*\(CSN:\s*\d+\)\s*\((\d{1,3})\s*y\.o\s*([MF])\)/) : null;
 
@@ -1064,7 +1228,8 @@ function extractDemographics(sources){
     rows.push(['Gender identity', header[4] === 'F' ? 'Female' : (header[4] === 'M' ? 'Male' : header[4]), 0]);
   } else if (altName) {
     rows.push(['Patient name', titleCaseFacility(joinWrapped(altName[1])), 1]);
-    rows.push(['Medical record #', joinWrapped(altName[2]), 1]);
+    const mrnVal = captureFieldValue(full, altName.index + altName[0].length);
+    if (mrnVal) rows.push(['Medical record #', joinWrapped(mrnVal), 1]);
     const altSex = full.match(/Sex at Birth:\s+([A-Za-z]+)/);
     if (altSex) rows.push(['Gender identity', altSex[1], 0]);
   } else if (pktHeader) {
@@ -1078,20 +1243,45 @@ function extractDemographics(sources){
   }
 
   let stacked = {};
-  if (!header && !altName) {
+  if (!header) {
+    // Runs as a further fallback even when altName matched -- altName only
+    // ever pulls out the name and MRN, so anything colon-delimited or
+    // same-line further down the banner (DOB, address, phone, marital
+    // status...) still needs this same general-purpose pass to find it.
     stacked = extractStackedFields(full, [
-      { key: 'address', label: /\bAddress\b\n/ },
-      { key: 'phone', label: /\bPhone\s+Numbers\b\n|\bPhone\b\n/ },
-      { key: 'email', label: /\bEmail\b\n/ },
-      { key: 'sex', label: /\bSex\b\n/ },
-      { key: 'dob', label: /\bDate of Birth\b\n/ },
-      { key: 'employer', label: /\bEmployer\b\n/ },
-      { key: 'pcp', label: /\bPCP\b\n/ },
-      { key: 'marital', label: /\bMarital Status\b\n/ },
-      { key: 'religion', label: /\bReligion\b\n/ },
-      { key: 'ssn', label: /\bSSN\b\n/ },
+      // A short, common-word label (Address, Phone, Email, Sex, SSN, PCP,
+      // Employer, Religion) must start right at a line start or right after
+      // a 2+ space column gap -- that's what tells it apart from the same
+      // word turning up mid-sentence in clinical narrative later in the
+      // packet. A distinctive multi-word phrase like "Date of Birth" or
+      // "Marital Status" essentially never occurs any other way in a
+      // referral, so a single space is enough there -- which matters
+      // because pdf.js doesn't always reconstruct the same double-space
+      // table gap in front of every column, only most of them. A trailing
+      // newline is no longer required either way, since some referral
+      // layouts print "Label value" on one line rather than stacking the
+      // value on its own line below the label.
+      // "Address" alone needs the stricter line-start/column-gap boundary
+      // (it's an ordinary English word elsewhere in clinical narrative), but
+      // a single space is safe right before "Address:" specifically -- that
+      // colon immediately after is not how the word is ever used mid-sentence.
+      { key: 'address', label: /(?<=^|\n|\s{2,})Address\b|(?<=^|\n|\s)Address(?=:)/, wrap: true },
+      { key: 'phone', label: /(?<=^|\n|\s{2,})(?:Phone\s+Numbers|Phone)\b/ },
+      { key: 'email', label: /(?<=^|\n|\s{2,})Email\b/ },
+      // "Sex" excludes "Sex at Birth" -- that's a different, longer label
+      // (its own fieldDef right below) and would otherwise capture "at
+      // Birth:" as if it were this field's value.
+      { key: 'sex', label: /(?<=^|\n|\s{2,})Sex\b(?!\s+at\s+Birth)/ },
+      { key: 'sexAtBirth', label: /(?<=^|\n|\s{2,})Sex at Birth\b/ },
+      { key: 'dob', label: /(?<=^|\n|\s)Date of Birth\b/ },
+      { key: 'employer', label: /(?<=^|\n|\s{2,})Employer\b/ },
+      { key: 'pcp', label: /(?<=^|\n|\s{2,})PCP\b/ },
+      { key: 'marital', label: /(?<=^|\n|\s)Marital Status\b/ },
+      { key: 'religion', label: /(?<=^|\n|\s)Religion\b/, wrap: true },
+      { key: 'ssn', label: /(?<=^|\n|\s{2,})SSN\b/ },
     ]);
-    if (stacked.sex && !csnHeader) rows.push(['Gender identity', stacked.sex, 0]);
+    const genderVal = stacked.sex || stacked.sexAtBirth;
+    if (genderVal && !csnHeader) rows.push(['Gender identity', genderVal, 0]);
   }
 
   const dob = pktHeader ? { 1: pktHeader[3] } : full.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})\s*\(\s*(\d{1,3})\s*\n?\s*(?:yrs?|years?)\)/);
@@ -1115,9 +1305,13 @@ function extractDemographics(sources){
   if (addrM) {
     rows.push(['Home address', `${normalizeWs(addrM[1])}, ${normalizeWs(addrM[2])}`, 0]);
   } else if (!header) {
-    const altAddr = full.match(/Address:\s+([\s\S]*?)\n\s*(?:Home:|Work:|Alt:)/);
-    if (altAddr) rows.push(['Home address', joinWrapped(altAddr[1]), 0]);
-    else if (stacked.address) rows.push(['Home address', stacked.address, 0]);
+    const altAddrLbl = full.match(/Address:\s*/);
+    if (altAddrLbl) {
+      const v = captureWrappedValue(full, altAddrLbl.index + altAddrLbl[0].length);
+      if (v) rows.push(['Home address', v, 0]);
+    } else if (stacked.address) {
+      rows.push(['Home address', stacked.address, 0]);
+    }
   }
 
   const phone = full.match(/(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\s*\(([MHW])\)/);
@@ -1163,7 +1357,10 @@ function extractDemographics(sources){
     if (altEc) rows.push(['Emergency contacts', `${joinWrapped(altEc[1])} (${altEc[2].trim()}) ${altEc[3].trim()}`, 0]);
   }
 
-  const referral = full.match(/PURE\s*HEALTH[^\n]*(?:TRANSITIONAL CARE|REHAB|SNF)[^\n]*/i);
+  // Non-greedy + a lookahead for the next real newline or double-space gap --
+  // not just "run to end of line" -- so this can't swallow the rest of a
+  // referral-coordination banner that happens to share a line with it.
+  const referral = full.match(/PURE\s*HEALTH[^\n]{0,60}?(?:TRANSITIONAL CARE|REHAB|SNF)[^\n]{0,40}?(?=\s{2,}|\n|$)/i);
   if (referral) rows.push(['Referral source', titleCaseFacility(normalizeWs(referral[0])), 1]);
 
   return rows;
@@ -1207,14 +1404,46 @@ function extractClinical(sources){
   if (!provBlock) {
     const acct = full.match(/Account #:\s+([\s\S]*?)\n\s*Patient Type:/);
     if (acct) rows.push(['Hospital account #', joinWrapped(acct[1]), 0]);
-    const patientType = full.match(/Patient Type:\s+([^\n]+)/);
-    if (patientType) rows.push(['Admission type', patientType[1].trim(), 0]);
+    const patientTypeLbl = full.match(/Patient Type:\s*/);
+    if (patientTypeLbl) {
+      const v = captureFieldValue(full, patientTypeLbl.index + patientTypeLbl[0].length);
+      if (v) rows.push(['Admission type', v, 0]);
+    }
     const arrival = full.match(/Arrival Date\/Time:\s+([\s\S]*?)\n\s*Projected Discharge/);
     if (arrival) rows.push(['Hospital admission date', joinWrapped(arrival[1]), 1]);
-    const diagnosis = full.match(/Primary Diagnosis:\s+([^\n]+)/);
-    if (diagnosis) rows.push(['Primary diagnosis (as documented)', diagnosis[1].trim(), 0]);
-    const sendingFacility = full.match(/Sending\s+Facility:\s+([^\n]+)/);
-    if (sendingFacility) rows.push(['Sending facility', sendingFacility[1].trim(), 1]);
+    const diagnosisLbl = full.match(/Primary Diagnosis:\s*/);
+    if (diagnosisLbl) {
+      const v = captureFieldValue(full, diagnosisLbl.index + diagnosisLbl[0].length);
+      if (v) rows.push(['Primary diagnosis (as documented)', v, 0]);
+    }
+    const sendingFacilityLbl = full.match(/Sending\s+Facility:\s*/);
+    if (sendingFacilityLbl) {
+      const v = captureFieldValue(full, sendingFacilityLbl.index + sendingFacilityLbl[0].length);
+      if (v) rows.push(['Sending facility', v, 1]);
+    }
+  }
+
+  // Some referrals carry no structured admission banner at all -- just a
+  // clinician's free-text note. A "Chief Complaint(s):" or "HPI:" line is
+  // the most common place that note states why the patient is being seen,
+  // so surface it verbatim (quoted, with its page) rather than leaving this
+  // whole card empty when a banner-style layout isn't present.
+  if (!rows.length) {
+    const noteLbl = full.match(/\b(?:Chief Complaints?|HPI)\s*:\s*/i);
+    if (noteLbl) {
+      const winStart = noteLbl.index + noteLbl[0].length;
+      const window = full.slice(winStart, winStart + 600);
+      const stopM = window.search(/\n\s*\n|\b(?:ROS|Review of Systems|Physical Exam|Assessment|Plan|PMH|Past Medical History)\s*:/i);
+      let cut = stopM === -1 ? window.slice(0, 400) : window.slice(0, stopM);
+      // Prefer ending on a full sentence rather than a hard character cutoff
+      // mid-word, if a sentence boundary is reasonably close to the end.
+      const lastSentence = cut.lastIndexOf('. ');
+      if (lastSentence > cut.length * 0.6) cut = cut.slice(0, lastSentence + 1);
+      const noteText = normalizeWs(joinWrapped(cut));
+      if (noteText) {
+        rows.push([`${noteLbl[0].replace(/:\s*$/, '').trim()} (as documented)`, noteText, 1]);
+      }
+    }
   }
 
   return rows;
@@ -1225,12 +1454,16 @@ function extractInsurance(sources){
   const rows = [];
   const full = (sources || []).map(([, t]) => t).join('\n');
 
-  const payer = full.match(/F\/O Payor\/Plan\b[^\n]*\n([^\n]+)/);
-  if (payer) rows.push(['Primary insurance', normalizeWs(payer[1]), 1]);
+  const payer = full.match(/F\/O Payor\/Plan\b[^\n]*\n/);
+  if (payer) {
+    const v = captureFieldValue(full, payer.index + payer[0].length);
+    if (v) rows.push(['Primary insurance', v, 1]);
+  }
 
-  const sub = full.match(/Subscriber\s+(?:Relation\s+to\s+Pt\s+)?Subscriber\s*#\s*\n([^\n]+)/);
+  const sub = full.match(/Subscriber\s+(?:Relation\s+to\s+Pt\s+)?Subscriber\s*#\s*\n/);
   if (sub) {
-    const tok = sub[1].split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
+    const line = captureFieldValue(full, sub.index + sub[0].length);
+    const tok = line.split(/\s{2,}/).map(x => x.trim()).filter(Boolean);
     if (tok.length) rows.push(['Subscriber ID', tok[tok.length - 1], 0]);
   }
 
@@ -1244,19 +1477,34 @@ function extractInsurance(sources){
   if (acct2) rows.push(['Hospital account #', acct2[1], 0]);
 
   if (!payer) {
-    const planDesc = full.match(/Plan Description:\s+([^\n]+)/);
-    if (planDesc) rows.push(['Primary insurance', planDesc[1].trim(), 1]);
-    const planNum = full.match(/Plan Number:\s+([^\n]+)/);
-    if (planNum) rows.push(['Plan / subscriber number', planNum[1].trim(), 0]);
-    const financialClass = full.match(/Financial Class:\s+([^\n]+)/);
-    if (financialClass) rows.push(['Financial class', financialClass[1].trim(), 0]);
+    const planDescLbl = full.match(/Plan Description:\s*/);
+    if (planDescLbl) {
+      const v = captureFieldValue(full, planDescLbl.index + planDescLbl[0].length);
+      if (v) rows.push(['Primary insurance', v, 1]);
+    }
+    const planNumLbl = full.match(/Plan Number:\s*/);
+    if (planNumLbl) {
+      const v = captureFieldValue(full, planNumLbl.index + planNumLbl[0].length);
+      if (v) rows.push(['Plan / subscriber number', v, 0]);
+    }
+    const financialClassLbl = full.match(/Financial Class:\s*/);
+    if (financialClassLbl) {
+      const v = captureFieldValue(full, financialClassLbl.index + financialClassLbl[0].length);
+      if (v) rows.push(['Financial class', v, 0]);
+    }
   }
 
   if (!payer && !sub) {
-    const inlineSub = full.match(/Subscriber:\s+([^\n]+?)\s{2,}Subscriber#:\s+([^\n]+)/);
-    if (inlineSub) rows.push(['Subscriber ID', inlineSub[2].trim(), 0]);
-    const groupNum = full.match(/Group#:\s+([^\n]+)/);
-    if (groupNum) rows.push(['Group #', groupNum[1].split(/\s{2,}/)[0].trim(), 0]);
+    const inlineSubLbl = full.match(/Subscriber:\s+([^\n]+?)\s{2,}Subscriber#:\s*/);
+    if (inlineSubLbl) {
+      const v = captureFieldValue(full, inlineSubLbl.index + inlineSubLbl[0].length);
+      if (v) rows.push(['Subscriber ID', v, 0]);
+    }
+    const groupNumLbl = full.match(/Group#:\s*/);
+    if (groupNumLbl) {
+      const v = captureFieldValue(full, groupNumLbl.index + groupNumLbl[0].length);
+      if (v) rows.push(['Group #', v.split(/\s{2,}/)[0].trim(), 0]);
+    }
   }
 
   return rows;
